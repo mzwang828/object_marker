@@ -81,7 +81,7 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>image_geometry</exec_depend>
   <exec_depend>point_cloud_jackal</exec_depend>
-  <exec_depend>message_generation</exec_depend>
+
   
 
 
