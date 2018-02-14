@@ -147,7 +147,7 @@ public:
     geometry_msgs::Point object_location;
     object_location.x = ntransform.getOrigin().x();
     object_location.y = ntransform.getOrigin().y();
-    object_location.z = ntransform.getOrigin().z();
+    object_location.z = ntransform.getOrigin().z(); // xyz is in /map frame
     planar_segment_srv_.request.center = object_location;
     if (planar_segment_client_.call(planar_segment_srv_))
     {
