@@ -29,6 +29,7 @@
 
 #include <object_marker/Object.h>
 #include <object_marker/Objects.h>
+#include <object_marker/MarkObject.h>
 
 using namespace std;
 
@@ -40,9 +41,12 @@ public:
     info_sub_ = nh_.subscribe("camera/depth_registered/camera_info", 10, &ObjectMarker::info_callback, this);
     image_sub_ = nh_.subscribe("camera/depth_registered/image_raw", 10, &ObjectMarker::depthcb, this);
     yolo_sub_ = nh_.subscribe<darknet_ros_msgs::BoundingBoxes>("darknet_ros/bounding_boxes", 1, &ObjectMarker::yolo_callback, this);
-    save_sub_ = nh_.subscribe<std_msgs::Int32>("save_status", 1, &ObjectMarker::save_callback, this);
     marker_pub_ = nh_.advertise<visualization_msgs::Marker>("object_marking", 10);
     planar_segment_client_ = nh_.serviceClient<point_cloud_jackal::PlanarSegmentation>("planer_segment");
+    object_marker_src_ = nh_.advertiseService("object_mark", &ObjectMarker::markObjectCB, this);
+
+    // set parameter
+    distanceThreshold_ = 0.1;
   }
 
   void info_callback(const sensor_msgs::CameraInfoConstPtr &msg)
@@ -52,30 +56,41 @@ public:
 
   void yolo_callback(const darknet_ros_msgs::BoundingBoxesConstPtr &msg)
   {
+    yolo_msgs_ = msg;
+  }
+
+  void depthcb(const sensor_msgs::ImageConstPtr &msg)
+  {
+    depth_msgs_ = msg;
+  }
+
+  bool rgbProc()
+  {
     pixel_x_.clear(); //column
     pixel_y_.clear(); //row
     temp_count_ = 0;
-    int size = msg->boundingBoxes.size();
+    int size = yolo_msgs_->boundingBoxes.size();
     for (int i = 0; i < size; i++)
     {
-      if (msg->boundingBoxes[i].Class.compare("tag") == 0)
+      if (yolo_msgs_->boundingBoxes[i].Class.compare("tag") == 0)
       {
-        pixel_x_.push_back((msg->boundingBoxes[i].xmin + msg->boundingBoxes[i].xmax) / 2);
-        pixel_y_.push_back((msg->boundingBoxes[i].ymin + msg->boundingBoxes[i].ymax) / 2);
+        pixel_x_.push_back((yolo_msgs_->boundingBoxes[i].xmin + yolo_msgs_->boundingBoxes[i].xmax) / 2);
+        pixel_y_.push_back((yolo_msgs_->boundingBoxes[i].ymin + yolo_msgs_->boundingBoxes[i].ymax) / 2);
         temp_count_ = temp_count_ + 1;
         isYoloUpdated_ = true;
       }
     }
     //ROS_INFO ("\t(%d, %d)\n", pixel_x[0], pixel_y[0]);  //test use
+    return true;
   }
 
-  void depthcb(const sensor_msgs::ImageConstPtr &msg)
+  bool depthProc()
   {
     if (isYoloUpdated_)
     {
       coordinate_camera_.resize(temp_count_);
       cv_bridge::CvImageConstPtr depth_img_cv;
-      depth_img_cv = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::TYPE_16UC1);
+      depth_img_cv = cv_bridge::toCvCopy(depth_msgs_, sensor_msgs::image_encodings::TYPE_16UC1);
       for (int i = 0; i < temp_count_; i++)
       {
         cv::Point2d pixel_point(pixel_x_[i], pixel_y_[i]);
@@ -88,6 +103,7 @@ public:
         }
       }
     }
+    return true;
     //ROS_INFO("\t(%f, %f, %f)\n", co_x[0], co_y[0], co_z[0]); //test use
   }
 
@@ -171,57 +187,102 @@ public:
     return single_object;
   }
 
-  void save_callback(const std_msgs::Int32ConstPtr &msg)
+    double calDistance(object_marker::Object a, object_marker::Object b)
   {
-    geometry_msgs::Point p;
+    double x1 = a.transform.translation.x;
+    double y1 = a.transform.translation.y;
+    double z1 = a.transform.translation.z;
+    double x2 = b.transform.translation.x;
+    double y2 = b.transform.translation.y;
+    double z2 = b.transform.translation.z;
+    double distance = sqrt((x1-x2)*(x1-x2)+(y1-y2)*(y1-y2)+(z1-z2)*(z1-z2));
+    return distance;
+  }
+
+  bool markObjectCB(object_marker::MarkObject::Request &req,
+                    object_marker::MarkObject::Response &res)
+  {
+    all_detect_objects_ = req.old_objects;
+    int old_size = all_detect_objects_.objects.size();
+    if (!this->rgbProc())
+    {
+      ROS_INFO("failed finding object from image");
+      res.success = false;
+      return true;
+    }
+    if (!this->depthProc())
+    {
+      ROS_INFO("failed calculate depth");
+      res.success = false;
+      return true;
+    }
     int lock_count = temp_count_;
+    int new_count = 0;
     for (int i = 0; i < lock_count; i++)
     {
-      // fx = coordinate_camera_[i].x;
-      // fy = coordinate_camera_[i].y;
-      // fz = coordinate_camera_[i].z;
       object_marker::Object single_object = this->object_calculation(coordinate_camera_[i].x, coordinate_camera_[i].y, coordinate_camera_[i].z);
-      // object_marker::Object single_object;
-      // single_object.transform.translation.x = transform.getOrigin().x();
-      // single_object.transform.translation.y = transform.getOrigin().y();
-      // single_object.transform.translation.z = transform.getOrigin().z();
-      // single_object.transform.rotation.x = transform.getRotation().x();
-      // single_object.transform.rotation.y = transform.getRotation().y();
-      // single_object.transform.rotation.z = transform.getRotation().z();
-      // single_object.transform.rotation.w = transform.getRotation().w();
-      detect_objects_.objects.push_back(single_object);
-      counts_ = detect_objects_.objects.size();
-      this->marker_publish(detect_objects_);
-      // an array[ID, x, y] to be save
-      float object_pose_orientation[7] = {detect_objects_.objects.back().transform.translation.x, detect_objects_.objects.back().transform.translation.y, detect_objects_.objects.back().transform.translation.z,
-                                          detect_objects_.objects.back().transform.rotation.x, detect_objects_.objects.back().transform.rotation.y, detect_objects_.objects.back().transform.rotation.z, detect_objects_.objects.back().transform.rotation.w};
-      ofstream out;
-      out.open("/home/mzwang/Desktop/objects.txt", ios_base::app | ios_base::out);
-      for (int i = 0; i < 7; i++)
+      // check if duplicate
+      bool isDuplicated = false;
+      for (int j = 0; j < all_detect_objects_.objects.size(); j++)
       {
-        out << object_pose_orientation[i] << " ";
+        if (this->calDistance(single_object, all_detect_objects_.objects[j]) < distanceThreshold_)
+        {
+          isDuplicated = true;
+          break;
+        }
       }
-      out << "\n";
-      out.close();
-    }
+      if (!isDuplicated)
+      {
+        all_detect_objects_.objects.push_back(single_object);
+        counts_ = all_detect_objects_.objects.size();
 
-    cout << "Detected Object Saved\n";
-    cout << "New saved " << lock_count << " objects, total saved " << counts_ << " objects.\n";
+        this->marker_publish(all_detect_objects_);
+        // an array[ID, x, y] to be save
+        float object_pose_orientation[7] = {all_detect_objects_.objects.back().transform.translation.x, all_detect_objects_.objects.back().transform.translation.y, all_detect_objects_.objects.back().transform.translation.z,
+                                            all_detect_objects_.objects.back().transform.rotation.x, all_detect_objects_.objects.back().transform.rotation.y, all_detect_objects_.objects.back().transform.rotation.z, all_detect_objects_.objects.back().transform.rotation.w};
+        ofstream out;
+        out.open("/home/mzwang/Desktop/objects.txt", ios_base::app | ios_base::out);
+        for (int i = 0; i < 7; i++)
+        {
+          out << object_pose_orientation[i] << " ";
+        }
+        out << "\n";
+        out.close();
+      }
+    }
+    if (all_detect_objects_.objects.size() > old_size)
+    {
+      res.success = true;
+      res.updated_objects = all_detect_objects_;
+      return true;
+    }
+    else
+    {
+      res.success = false;
+      return true;
+    }
+    // cout << "Detected Object Saved\n";
+    // cout << "New saved " << lock_count << " objects, total saved " << counts_ << " objects.\n";
   }
 
 private:
   ros::NodeHandle nh_;
-  ros::Subscriber info_sub_, image_sub_, yolo_sub_, save_sub_;
+  ros::Subscriber info_sub_, image_sub_, yolo_sub_;
   ros::Publisher marker_pub_;
   ros::ServiceClient planar_segment_client_;
+  ros::ServiceServer object_marker_src_;
   point_cloud_jackal::PlanarSegmentation planar_segment_srv_;
   point_cloud_jackal::Plane plane_s_;
   image_geometry::PinholeCameraModel model1_;
-  object_marker::Objects detect_objects_;
+  object_marker::Objects all_detect_objects_;
+
+  darknet_ros_msgs::BoundingBoxesConstPtr yolo_msgs_;
+  sensor_msgs::ImageConstPtr depth_msgs_;
 
   vector<int> pixel_x_, pixel_y_;
   vector<cv::Point3d> coordinate_camera_;
   int temp_count_, counts_;
+  double distanceThreshold_;
   bool isYoloUpdated_;
 };
 
