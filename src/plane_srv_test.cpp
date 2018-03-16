@@ -49,7 +49,7 @@ class ObjectMarker
         marker_pub_ = nh_.advertise<visualization_msgs::Marker>("object_marking", 10);
         client_ = nh_.serviceClient<point_cloud_jackal::PlanarSegmentation>("planer_segment");
         srv_.request.center.x = 1; 
-        srv_.request.center.y = 1; 
+        srv_.request.center.y = 0; 
         srv_.request.center.z = 1; 
     }
 
